@@ -1,0 +1,587 @@
+\begin{document}
+
+\title{Provably Efficient Online RLHF with One-Pass Reward Modeling}
+
+\author{Long-Fei Li$^*$, Yu-Yang Qian$^*$, Peng Zhao, Zhi-Hua Zhou}
+\affil[]{
+  National Key Laboratory for Novel Software Technology, Nanjing University, China\\
+  School of Artificial Intelligence, Nanjing University, China,\\
+  \texttt{\{lilf, qianyy, zhaop, zhouzh\}@lamda.nju.edu.cn}
+  }
+\date{}
+
+\renewcommand{\REPLACED}{\fnsymbol{footnote}}
+\footnotetext[1]{Equal contribution.}
+\renewcommand{\REPLACED}{\arabic{footnote}}
+\setcounter{footnote}{0}
+
+\maketitle
+
+
+\begin{abstract}
+  Reinforcement Learning from Human Feedback (RLHF) has shown remarkable success in aligning Large Language Models (LLMs) with human preferences. Traditional RLHF approaches rely on a fixed dataset, which often suffers from limited coverage. To this end, online RLHF has emerged as a promising direction, enabling iterative data collection and model improvement. Despite its potential, this paradigm faces a key bottleneck: the requirement to continuously integrate new data into the historical dataset and re-optimize the model from scratch at each iteration, resulting in computational and storage costs that grow linearly with the number of iterations. In this work, we address this challenge by proposing a \emph{one-pass} reward modeling method that does not require storing the historical data and can be computed in constant time. Specifically, we first formalize RLHF as a contextual preference bandit problem and design an online mirror descent algorithm with a tailored local norm to replace the standard maximum likelihood estimation for reward modeling. We then apply our method to various online RLHF settings, including passive data collection, active data collection, and deployment-time adaptation. We provide theoretical guarantees showing that our method improves both statistical and computational efficiency. Finally, we provide practical algorithms and conduct experiments using \texttt{Llama-3-8B-Instruct} and \texttt{Qwen2.5-7B-Instruct} models on the \mbox{Ultrafeedback-binarized} and Mixture2 datasets, validating the effectiveness of our proposed method.
+\end{abstract}
+
+
+\section{Introduction}
+\label{sec:introduction}
+
+Reinforcement Learning from Human Feedback is a critical technique for training large language models using human preference feedback~\citep{NeurIPS'22:Ouyang-InstructGPT,arXiv'22:Bai-RLHF}. Typical RLHF methods involve collecting extensive data, each consisting of a prompt, a pair of responses, and a preference label indicating which response is preferred. Then, a reward model is trained to predict the human preference, and the LLM is fine-tuned based on the reward model by the RL algorithms.
+
+Traditional RLHF methods primarily rely on fixed preference datasets, which typically suffer from limited coverage. As a result, the learned reward models struggle to generalize to out-of-distribution (OOD) samples, constraining the effectiveness of the aligned models. To address this, online RLHF has emerged as a promising paradigm, enabling iterative data collection and model improvement. The general process can be described as \setcounter{romancounter}{1}\textit{(\roman{romancounter})} collect the preference data; \setcounter{romancounter}{2}\textit{(\roman{romancounter})} update the model using the collected preference data. The above two steps are repeated for several iterations to boost model performance. In practice, the Claude~\citep{arXiv'22:Bai-RLHF} and LLaMA-2~\citep{arXiv'23:llama-2} projects have demonstrated that online RLHF can significantly enhance model performance.
+
+Despite its empirical success, online RLHF introduces significant computational challenges. Specifically, the typical process of online RLHF involves continuously integrating newly collected data into the dataset and re-optimizing the model from scratch over the expanded dataset. While this strategy is statistically efficient, its computational and storage costs scale linearly with the number of iterations, which becomes prohibitive in long-term iterations, especially on edge devices where computation and memory resources are inherently limited. This raises a pressing question:
+\begin{center}
+    \emph{Can we design online RLHF algorithms that are both statistically and computationally efficient?}
+\end{center}
+
+\begin{table*}[!t]
+    \centering
+    \caption{\small Comparison between previous works and our work in terms of the statistical and computational efficiency across different online RLHF settings. The column ``Context'' and ``Action'' represent the context and action are determined by the environment (\faGlobe) or the algorithm (\faSearch). For the computational efficiency (time and storage), we highlight the dependence on the $t$ at iteration $t$. Here, $d$ is the feature dimension, $T$ is the total number of iterations, $\kappa$ is the non-linearity coefficient, $\Phi=\mathbb{E}_{x \sim \rho} \left[\phi(x,\pi^*(x))\right]$ is the concentrability vector, $V_{T}$ and $\mathcal{H}_{T}$ are two local norms satisfying $\norm{\Phi}_{\mathcal{H}_T^{-1}} \leq  \sqrt{\kappa} \norm{\Phi}_{V_T^{-1}}$ (*: amortized complexity over $T$).}
+    \vspace{-1mm}
+    \label{tab:result}
+    \setlength{\tabcolsep}{6pt}
+    \resizebox{0.95\textwidth}{!}{
+    \begin{tabular}{ccccccc}
+    \toprule
+    \textbf{Setting} & \textbf{Context} &\textbf{Action}  & \textbf{Gap/Regret} & \textbf{Time} & \textbf{Storage} &\textbf{Reference}\\ \midrule
+    \multirow{2}{*}{Passive} & \multirow{2}{*}{{\Large \faGlobe}} & \multirow{2}{*}{{\Large \faGlobe}}     & $\widetilde{\mathcal{O}} \big(\sqrt{d} \cdot \kappa \norm{\Phi}_{V_{T}^{-1}}\big)$          & $\mathcal{O}(\log T)^*$    & $\mathcal{O}(t)$ &\citet{ICML'23:Zhu-Principled}  \\
+                       &  &        & $\widetilde{\mathcal{O}} \big(\sqrt{d} \cdot \norm{\Phi}_{\mathcal{H}_{T}^{-1}}\big)$          & $\mathcal{O}(1)$    & $\mathcal{O}(1)$ & Ours (Theorem~\ref{thm:passive}) \\ \midrule
+    \multirow{2}{*}{Active} & \multirow{2}{*}{{\Large \faSearch}} & \multirow{2}{*}{{\Large \faSearch}}      & $\widetilde{\mathcal{O}} \big(d \sqrt{\kappa / T}\big)$          & $\mathcal{O}(t \log t)$    & $\mathcal{O}(t)$ & \citet{arXiv'24:Das-RLHF-active} \\
+                       &  &       & $\widetilde{\mathcal{O}} \big(d \sqrt{\kappa / T}\big)$         & $\mathcal{O}(1)$   & $\mathcal{O}(1)$  & Ours (Theorem~\ref{thm:active}) \\ \midrule
+    \multirow{2}{*}{Deployment} & \multirow{2}{*}{{\Large \faGlobe}} & \multirow{2}{*}{{\Large \faSearch}}      & $\widetilde{\mathcal{O}} \big(d \kappa\sqrt{T}\big)$         & $\mathcal{O}(t \log t)$   & $\mathcal{O}(t)$  & \citet{AISTATS'23:Saha-Dueling-RL}\\
+                       &  &       & $\widetilde{\mathcal{O}} \big(d \sqrt{\kappa T}\big)$         & $\mathcal{O}(1)$   & $\mathcal{O}(1)$ & Ours (Theorem~\ref{thm:deploy})  \\ \bottomrule
+    \end{tabular}
+    }
+    \vspace{-2mm}
+\end{table*}
+
+
+In this work, we provide an affirmative answer to this question in the setting of contextual preference bandits with linearly parameterized reward functions. Specifically, building on recent theoretical advancements in RLHF~\citep{ICML'23:Zhu-Principled,arXiv'24:Das-RLHF-active,arXiv'24:Ji-RLHF-active}, we formulate the RLHF problem as a contextual dueling bandit problem~\citep{JCSS'12:K-armed-dueling-bandits,NeurIPS'21:Saha-Preference-bandits}. While prior work has explored this formulation, most existing methods focus on statistical efficiency and overlook the growing computational burden. To bridge this gap, we introduce a novel \emph{one-pass} reward modeling algorithm which does not require storing the historical data and can be computed in constant time. Our method is based on the online mirror descent framework with a tailored local norm that captures second-order information. We then apply our method to several online RLHF settings, including passive data collection, active data collection, and deployment-time adaptation. We establish theoretical guarantees showing that our method improves both statistical and computational efficiency. Table~\ref{tab:result} summarizes the comparison of our method with the existing methods.
+
+
+To enable usage in LLMs, we develop practical variants of our method. Direct computation and storage of the Hessian matrix is prohibitively expensive; thus, we propose an efficient approximation using Hessian-Vector Products (HVP) combined with conjugate gradient descent, avoiding explicit second-order information and relying only on first-order computation. Additionally, we employ rejection sampling to approximate model uncertainty in a computationally efficient manner. With the above techniques, we conduct experiments using the \texttt{LLaMA-3-8B-Instruct}~\citep{arXiv'24:llama-3} and \texttt{Qwen2.5-7B-Instruct}~\citep{arXiv'24:Qwen-2.5} models on the Ultrafeedback-binarized~\citep{arXiv'23:Ultrafeedback} and Mixture2~\citep{TMLR'24:Dong-RLHF} datasets, validating the effectiveness of our method.
+
+To summarize, our contributions are as follows:
+\begin{itemize}
+    \item By formulating the RLHF problem as a contextual dueling bandit, we propose a novel one-pass reward modeling algorithm and establish the corresponding estimation error bound. Our method is built upon the online mirror descent framework and incorporates a carefully designed local norm that captures second-order information for improved learning efficiency.
+    \item We apply our method to a broad range of online RLHF settings, including passive data collection, active data collection, and deployment-time adaptation. For each setting, we design tailored algorithms and establish corresponding theoretical guarantees, demonstrating that our approach achieves improved statistical and computational efficiency than existing methods.
+    \item We develop practical algorithms by approximating the update using Hessian-Vector Products combined with conjugate gradient descent, and estimating uncertainty via rejection sampling. Based on the above techniques, we conduct empirical evaluations using \texttt{LLaMA-3-8B-Instruct} and \texttt{Qwen2.5-7B-Instruct} models on Ultrafeedback-binarized and Mixture2 datasets, showing our method achieves better performance in both statistical and computational efficiency.
+\end{itemize}
+
+\textbf{Organization.} The rest of the paper is organized as follows: Section~\ref{sec:problem_setup} introduces the problem setup. Section~\ref{sec:framework} presents our proposed one-pass reward modeling method. Section~\ref{sec:applications} applies our method to different online RLHF settings. Section~\ref{sec:practical} provides the practical implementations. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:conclusion} concludes the paper. We defer the proofs, experiment details, and more experimental results to the appendix.
+
+
+\section{Related Work}
+\label{sec:related_work}
+
+In this section, we review the works most closely related to ours, including offline RLHF, online RLHF, contextual dueling bandits, and active learning.
+
+\paragraph{Offline RLHF.} Learning from human preferences with deep learning models dates back to~\citet{NIPS'17:RLHF} and has been recently popularized by the success of large language models~\citep{arXiv'22:Bai-RLHF, arXiv'23:llama-2, arXiv'23:GPT-4}. Existing results generally fall into two categories: reward-based and reward-free. Reward-based methods typically consist of two steps: reward modeling and reward maximization~\citep{NeurIPS'22:Ouyang-InstructGPT}. Given preference data, the reward model is trained to predict preference labels, and the LLM is fine-tuned based on the reward model using RL algorithms such as PPO~\citep{arXiv'17:PPO}. In contrast, reward-free methods directly optimize the LLM using human preference feedback, without relying on explicit reward modeling~\citep{NeurIPS'23:DPO, AISTATS'24:Azar-IPO}. Among these works, Direct Preference Optimization (DPO)~\citep{NeurIPS'23:DPO} is one of the most popular reward-free methods, which treats generative models directly as reward models and optimizes them using human preference feedback. Given the empirical success of RLHF, recent efforts have been devoted to developing a deeper theoretical understanding of this approach. \citet{ICML'23:Zhu-Principled} proposed to formulate RLHF as a contextual preference bandit problem and proved the maximum likelihood estimator converges under both the Bradley-Terry (BT) model and Plackett-Luce (PL) model with linear reward functions.
+
+
+\paragraph{Online RLHF.} Offline RLHF methods rely on fixed preference datasets, which often suffer from limited data coverage. Consequently, the resulting reward models struggle to generalize to out-of-distribution samples, thereby limiting the effectiveness of the aligned models. To overcome this limitation,online RLHF has emerged as a promising alternative, enabling iterative data collection and continuous model refinement. The works~\citep{TMLR'23:RAFT,arXiv'24:Guo-Online-AI-feedback,ICML'24:Yuan-Self-rewarding,ICLR'25:Wu-Self-play} have demonstrated that online iterative variants of direct preference learning algorithms significantly outperform their offline counterparts. \citet{ICML'24:Xiong-Iterative} identified key challenges in offline RLHF and theoretically demonstrated the potential benefits of online exploration. Recent work has incorporated optimism-driven bonus terms into the DPO loss to encourage exploration in online RLHF~\citep{ICLR'25:XPO,ICLR'25:VPO,TMLR'25:Zhang-Self-exploring}. These studies primarily focus on the sample efficiency, but do not consider the accompanying increase in computational complexity. In this paper, we propose algorithms that achieve both statistical and computational efficiency.
+
+
+\paragraph{Contextual Dueling Bandits and RL.} Dueling bandits are a variant of the multi-armed bandit problem in which the learner sequentially selects a pair of arms and receives noisy binary feedback~\citep{JCSS'12:K-armed-dueling-bandits}. The contextual dueling bandit framework extends this setting by incorporating contextual information~\citep{COLT'15:Dudik-Contextual-dueling, NeurIPS'21:Saha-Preference-bandits, ICML'22:Bengs-Stochastic-Contextual-dueling}. Within this framework, \citet{NeurIPS'21:Saha-Preference-bandits} studied the $K$-armed contextual dueling bandit problem, and \citet{AISTATS'23:Saha-Dueling-RL} further extended it to the reinforcement learning setting. Additionally, \citet{NeurIPS'24:Sekhari-Contextual-bandits} investigated the contextual dueling bandit problem under an active learning paradigm, where the learner adaptively queries for feedback, aiming to minimize both regret and the number of queries. To move beyond linear reward functions, \citet{ICLR'25:Verma-Neural-Dueling-Bandits} introduced the neural dueling bandit problem, modeling the reward function using neural networks. These prior works commonly rely on maximum likelihood estimation to learn the reward function, leading to computational complexity that grows linearly with the number of iterations. In contrast, we propose algorithms that maintain constant per-iteration computational complexity, while preserving statistical efficiency.
+
+
+\paragraph{Active Learning.} Active learning is a paradigm  that aims to reduce the labeling cost by selecting the most informative samples for annotation~\citep{09:Settles-Active-learning}. In general, existing work can be categorized into two settings: pool-based and stream-based. The pool-based setting~\citep{92:Query-by-committee, MLJ'97:active, NISP'10:Huang-active} involves the learner iteratively selecting a batch of informative samples from a large unlabeled pool, querying their labels, updating the model, and repeating this process. In contrast, the stream-based setting~\citep{COLT'04:Bianchi-active, JMLR'06:Bianchi-selective, MLJ'24:Davide-active} requires the learner to sequentially observe data points and decide in real time whether to query their labels. Within the context of RLHF, \citet{arXiv'24:Das-RLHF-active} studied pool-based active learning, while \citet{arXiv'24:Ji-RLHF-active} focused on the stream-based setting. In this work, we focus on the pool-based strategy, which can be naturally extended to the stream-based scenario.
+
+\section{Problem Setup}
+\label{sec:problem_setup}
+
+Following recent advancements in RLHF~\citep{ICML'23:Zhu-Principled,arXiv'24:Das-RLHF-active,ICML'24:Xiong-Iterative}, we formulate RLHF as a contextual bandit problem. Specifically, we have a set of contexts $\mathcal{X}$ and a set of possible actions $\mathcal{A}$ per context. To learn with human preference feedback, the learner selects a tuple $(x, a, a')$ to present to the human, where $x \in \mathcal{X}$ is the context, $a, a' \in \mathcal{A}$ are the actions. The human then provides a binary preference feedback $y \in \{0, 1\}$, where $y = 1$ indicates that the human prefers action $a$ over action $a'$, and $y = 0$ otherwise. We study the commonly used Bradley-Terry (BT) model in preference learning~\citep{BT-model}, which assumes that the human's preference is generated by a logistic function of the difference in the rewards of the two actions.
+
+\begin{myDef}[Bradley-Terry Model]
+    \label{def:BT}
+    Given a context $x \in \mathcal{X}$ and two actions $a, a' \in \mathcal{A}$, the probability of the human preferring action $a$ over action $a'$ is given by
+    \begin{align}
+        \mathbb{P}\left[y=1 \mid x, a, a^{\prime}\right] = \frac{\exp \left(r(x, a)\right)}{\exp \left(r(x, a)\right)+\exp \left(r\left(x, a^{\prime}\right)\right)},
+        \label{eq:BT}
+    \end{align}
+    where $r: \mathcal{X} \times \mathcal{A} \to \mathbb{R}$ is a latent reward function.
+\end{myDef}
+
+We consider the widely used linear reward in the literature~\citep{ICML'23:Zhu-Principled,ICLR'25:VPO}.
+\begin{myAssumption}
+    \label{asm:linear-reward}
+    It holds that $r(x, a) = \phi(x, a)^\top \theta^*$ where $\phi(x, a): \mathcal{X} \times \mathcal{A} \to \mathbb{R}^d$ is the known and fixed feature map, and $\theta^* \in \mathbb{R}^d$ is the unknown parameter vector. Furthermore, we assume $\norm{\phi(x, a)}_2 \leq L$ for all $x \in \mathcal{X}$ and $a \in \mathcal{A}$ and $\theta^* \in \Theta$ where $\Theta = \{\theta \in \mathbb{R}^d \mid \|\theta\|_2 \leq B\}$.
+\end{myAssumption}
+\begin{myRemark}
+    The feature mapping $\phi$ can be constructed by removing the last layer of a pre-trained large language model, and $\theta^*$ corresponds to the weights of the last layer.
+\end{myRemark}
+
+Then, we can rewrite the probability as $\mathbb{P}\left[y=1 \mid x, a, a^{\prime}\right] = \sigma(\phi(x, a)^\top \theta^* - \phi(x, a')^\top \theta^* )$, where $\sigma(w) = \frac{1}{1 + \exp(-w)}$. Next, we introduce a key quantity that captures learning complexity.
+\begin{myDef}
+    \label{def:kappa}
+    The non-linearity coefficient $\kappa$ is defined as
+    \begin{align}
+        \kappa = \max_{x \in \mathcal{X}, a, a' \in \mathcal{A}} \max_{\theta \in \Theta} \frac{1}{\dot{\sigma}\left(\phi(x, a)^\top \theta - \phi(x, a')^\top \theta\right)},
+        \label{eq:kappa}
+    \end{align}
+    where $\dot{\sigma}(w) = \sigma(w)(1 - \sigma(w))$ is the derivative function.
+\end{myDef}
+The quantity $\kappa$ captures the learning complexity that satisfies $\kappa \leq 2 + \exp(2BL) + \exp(-2BL)$. It may be exceedingly large with exponential dependence on the scale of features and parameters.
+
+\section{Our Framework}
+\label{sec:framework}
+
+In this section, we first introduce the general framework for online RLHF. We then present our one-pass reward modeling method. Finally, we show the theoretical guarantee of our method.
+
+
+\subsection{General Framework for Online RLHF}
+
+
+The general process of online RLHF involves iteratively collecting data and updating the model based on the collected data. At iteration $t$, the process can be formulated as:
+\begin{enumerate}[label=(\textit{\roman*}), leftmargin=*]
+    \item \textbf{New data collection}: Sample a prompt $x_t$ and two responses $a_t$ and $a_t'$, query the oracle to obtain the preference label $y_t \in \{0,1\}$, expand the dataset $\mathcal{D}_{t+1} = \mathcal{D}_t \cup \{(x_t, a_t, a_t', y_t)\}$.
+    \item \textbf{Reward modeling}: Train a reward model $r_{t+1}$ using the historical dataset $\mathcal{D}_{t+1}$.
+    \item \textbf{Policy optimization (Optional)}: Update the policy $\pi_{t+1}$ using the reward model $r_{t+1}$.
+\end{enumerate}
+A key challenge in online RLHF is that the reward model needs to be trained on the entire historical dataset at each iteration, which is computationally expensive. Specifically, let $z_t = \phi(x_t, a_t) - \phi(x_t, a_t')$ be the feature difference, given the historical dataset $\mathcal{D}_{t+1}=\left\{(x_i, a_i, a_i', y_i)\right\}_{i=1}^{t}$, the reward model is estimated via maximum likelihood estimation as
+\begin{align}
+    \label{eq:mle}
+      \widehat{\theta}_{t+1}=\argmin_{\theta \in \mathbb{R}^d} \sum_{i=1}^t \ell_i(\theta), \text{where } \ell_t(\theta) =  - y_t \log (\sigma(z_t^\top \theta)) - \left(1-y_t\right) \log(1-\sigma(z_t^\top \theta)).
+\end{align}
+However, Eq.~\eqref{eq:mle} does not admit a closed-form solution, requiring iterative optimization techniques, such as gradient descent, to achieve an $\varepsilon$-accurate estimate. As discussed by~\citet{AISTATS'22:Faury-Jointly}, obtaining such accuracy with MLE typically requires $\mathcal{O}(\log(1/\varepsilon))$ optimization steps. Since the loss function is defined over the entire historical dataset, each iteration incurs a computational cost of $\mathcal{O}(t)$ gradient evaluations. In practice, $\varepsilon$ is often set to $1/t$ to ensure that the optimization error does not dominate the overall estimation error. As a result, the total computational complexity at iteration $t$ becomes $\mathcal{O}(t \log t)$, a cost that is prohibitive for long-term online RLHF applications.
+
+\subsection{One-pass Reward Modeling}
+
+Drawing inspiration from recent advancements in logistic bandits~\citep{AISTATS'22:Faury-Jointly, NeurIPS'23:MLogB} and multinomial logit MDPs~\citep{NeurIPS'24:MNLmdp}, we propose a novel one-pass reward modeling method that reduces the complexity to constant time per iteration. First, define the gradient $g_t(\theta)$ and Hessian $H_t(\theta)$ of loss $\ell_t(\theta)$ as $g_t(\theta) = (\sigma(z_t^{\top} \theta)-y_t) z_t$ and $H_t(\theta) = \dot{\sigma}(z_t^{\top} \theta) z_t z_t^{\top}$.
+
+
+\textbf{Implicit OMD.}~~To improve the computational efficiency, \citet{AISTATS'22:Faury-Jointly} observed that the cumulative past log-loss is strongly convex and can therefore be well approximated by a quadratic function. Building on this observation, they proposed the following update rule:
+\begin{align}
+  \label{eq:implicit-omd}
+  \bar{\theta}_{t+1}=\argmin_{\theta \in \Theta} \Big\{\ell_t(\theta)+\frac{1}{2 \eta}\left\|\theta-\bar{\theta}_t\right\|_{\bar{\mathcal{H}}_t}^2\Big\},
+\end{align}
+where $\bar{\mathcal{H}}_t=\sum_{i=1}^{t-1} H_i\left(\bar{\theta}_{i+1}\right)+\lambda I$ is the local norm, and $\eta$ is the step size. The optimization problem can be decomposed into two terms. The first term is the instantaneous log-loss $\ell_{t}(\theta)$, which accounts for the information of the current sample. The second consists of a quadratic proxy for the past losses constructed through the sequence $\{\bar{\theta}_{i}\}_{i\leq t}$. A key component is the design of the local norm $\bar{\mathcal{H}}_t$, which approximates the Hessian matrix by $H_i\left(\bar{\theta}_{i+1}\right)$ at a \emph{lookahead} point $\bar{\theta}_{i+1}$. Such a Hessian matrix effectively captures local information and is crucial for ensuring statistical efficiency.
+
+The update rule in Eq.~\eqref{eq:implicit-omd} benefits from a one-pass data processing property, which eliminates the need to store the entire historical dataset. However, the optimization problem in Eq.~\eqref{eq:implicit-omd} still does not have a closed-form solution. But since the loss is defined only on the current sample, it requires only $\mathcal{O}(1)$ gradient computations per step, leading to a total computational complexity of $\mathcal{O}(\log t)$ at iteration $t$. This represents a significant improvement over the $\mathcal{O}(t \log t)$ complexity of the MLE estimator in Eq.~\eqref{eq:mle}. Nevertheless, the computational complexity of the implicit OMD is still increasing with the number of iterations, which motivates us to design a constant-time method.
+
+\textbf{Standard OMD.}~~To enhance computational efficiency, a natural alternative is to replace this formulation with the standard OMD framework, which permits a closed-form solution and thus eliminates the need for iterative optimization. However, the standard OMD minimizes a first-order approximation of the loss function, which sacrifices several key properties compared to its implicit counterpart, as demonstrated by \citet{NeurIPS'20:Campolongo-IOMD}. Specifically, the standard OMD formulation updates using $g_t(\theta_t)$, whereas the implicit OMD updates the algorithm approximately with the subsequent sub-gradient, $g_t(\theta_{t+1})$. This distinction results in a notable gap in the convergence rates of the two methods. To this end, we propose to approximate the current loss $\ell_t(\theta)$ using a second-order Taylor expansion, drawing inspiration from~\citet{NeurIPS'23:MLogB}. Define the second-order approximation of $\ell_t(\theta)$ as $\widetilde{\ell}_t(\theta) = \ell_t(\widetilde{\theta}_t) + g_t(\widetilde{\theta}_t)^\top (\theta - \widetilde{\theta}_t) + \frac{1}{2} \norm{\theta - \widetilde{\theta}_t}_{H_t(\widetilde{\theta}_t)}^2$. Then, we replace the loss $\ell_t(\theta)$ in Eq.~\eqref{eq:implicit-omd} with the approximation $\widetilde{\ell}_t(\theta)$, leading to the update rule:
+\begin{align}
+  \label{eq:omd}
+  \widetilde{\theta}_{t+1}=\argmin_{\theta \in \Theta} \Big\{\big\langle g_t(\widetilde{\theta}_t), \theta \big\rangle +\frac{1}{2 \eta}\big\|\theta-\widetilde{\theta}_t\big\|_{\widetilde{\mathcal{H}}_t}^2\Big\},
+\end{align}
+where $\eta$ is the step size and $\widetilde{\mathcal{H}}_t = \mathcal{H}_t + \eta H_t(\widetilde{\theta}_t)$ is the local norm with $\mathcal{H}_t \triangleq \sum_{i=1}^{t-1} H_i(\widetilde{\theta}_{i+1}) + \lambda I$. Eq.~\eqref{eq:omd} can be solved with a projected gradient step with the following equivalent form:
+\begin{align*}
+  \widetilde{\theta}_{t+1}^{\prime} = \widetilde{\theta}_t - \eta \widetilde{\mathcal{H}}_t^{-1} g_t(\widetilde{\theta}_t), ~~~ \widetilde{\theta}_{t+1} = \argmin_{\theta \in \Theta} \norm{\theta - \widetilde{\theta}_{t+1}^{\prime}}_{\widetilde{\mathcal{H}}_t}^2.
+\end{align*}
+Thus, the estimator $\widetilde{\theta}_{t+1}$ provides a closed-form solution, leading to a $\mathcal{O}(1)$ computational complexity per iteration. Since the estimator processes the samples in a one-pass manner, it mitigates the memory burden associated with computing the gradient of the full dataset. These properties make the method particularly suitable for edge devices, where both memory and computational resources are severely constrained. The detailed process of our proposed method is presented in Algorithm~\ref{alg:omd}.
+
+\begin{figure*}[t]
+  \centering
+  \begin{minipage}[t]{0.48\textwidth}
+    \begin{algorithm}[H]
+      \caption{One-Pass Reward Modeling}
+      \label{alg:omd}
+    \setstretch{1.14}
+    \begin{algorithmic}[1]
+      \REQUIRE Preference data $(x_t, a_t, a_t', y_t)$
+      \STATE Define the loss function $\ell_t(\theta)$ as Eq.~\eqref{eq:mle}
+      \STATE Update $\widetilde{\mathcal{H}}_t = \mathcal{H}_t + \eta H_t(\widetilde{\theta}_t)$
+      \STATE Compute $\widetilde{\theta}_{t+1}^{\prime} = \widetilde{\theta}_t - \eta \widetilde{\mathcal{H}}_t^{-1} g_t(\widetilde{\theta}_t)$
+      \STATE Compute $\widetilde{\theta}_{t+1} = \argmin_{\theta \in \Theta} \norm{\theta - \widetilde{\theta}_{t+1}^{\prime}}_{\widetilde{\mathcal{H}}_t}^2$ \\
+      \STATE Update $\mathcal{H}_{t+1} = \mathcal{H}_{t} + H_t(\widetilde{\theta}_{t+1})$
+      \ENSURE $\widetilde{\theta}_{t+1}$
+    \end{algorithmic}
+  \end{algorithm}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.48\textwidth}
+  \begin{algorithm}[H]
+    \caption{Passive Data Collection}
+    \label{alg:passive}
+    \begin{algorithmic}[1]
+      \REQUIRE Regularization $\lambda$, step size $\eta$
+      \STATE Initialize $\widetilde{\theta}_1 = \bm{0}$ and $\widetilde{\mathcal{H}}_1 = \lambda I$
+      \FOR{$t = 1, 2, \ldots, T$}
+        \STATE Observe preference data $(x_t, a_t, a_t', y_t)$
+        \STATE $\widetilde{\theta}_{t+1} = \text{Algorithm~\ref{alg:omd} } (x_t, a_t, a_t', y_t)$
+      \ENDFOR
+      \STATE Construct $\widetilde{J}_{T+1}(\pi)$ as in Eq.~\eqref{eq:optimistic_value}
+      \ENSURE $\pi_{T+1} = \argmax_{\pi \in \Pi} \widetilde{J}_{T+1}(\pi)$
+    \end{algorithmic}
+  \end{algorithm}
+\end{minipage}
+\vspace{-3mm}
+\end{figure*}
+
+\subsection{Theoretical Guarantee}
+Note that the update rule in Eq.~\eqref{eq:omd} is a special case of online mirror descent, specifically:
+\begin{align*}
+  \widetilde{\theta}_{t+1}=\argmin_{\theta \in \Theta} \Big\{\big\langle g_t(\widetilde{\theta}_t), \theta \big\rangle +\frac{1}{\eta}\mathcal{D}_{\psi_t}(\theta, \widetilde{\theta}_t)\Big\},
+\end{align*}
+where $\psi_t(\theta) = \frac{1}{2}\norm{\theta}_{\widetilde{\mathcal{H}}_t}^2$ is the regularizer and $\mathcal{D}_{\psi_t}(\theta, \widetilde{\theta}_t) = \psi_t(\theta) - \psi_t(\widetilde{\theta}_t) - \langle \nabla \psi_t(\widetilde{\theta}_t), \theta - \widetilde{\theta}_t \rangle$ is Bregman divergence. Based on the analysis of online mirror descent, we have the following lemma.
+
+\begin{myLemma}
+    \label{lem:confidence_set}
+    Let $\delta \in(0,1]$, set $\eta=(1 / 2) \log 2+\left(BL+1\right)$ and $\lambda=84 \sqrt{2} \eta (dL^2 + BL^3)$, define $\mathcal{C}_t =\{\theta \in \Theta \mid \|\theta - \widetilde{\theta}_t \|_{\mathcal{H}_t} \leq \widetilde{\beta}_t\triangleq \mathcal{O} \big(\sqrt{d}(\log (t / \delta))^2\big) \}$. Then, we have $\operatorname{Pr}\left[\forall t \geqslant 1, \theta^* \in \mathcal{C}_t\right] \geqslant 1-\delta$.
+\end{myLemma}
+
+
+\textbf{Comparison with MLE.}~~For the MLE estimator in Eq.~\eqref{eq:mle}, prior works~\citep{ICML'23:Zhu-Principled,arXiv'24:Das-RLHF-active,arXiv'24:Ji-RLHF-active} have shown $\|\theta - \widetilde{\theta}_t\|_{V_t} \leq \widetilde{\mathcal{O}}(\kappa \sqrt{d})$, where $V_t = \sum_{i=1}^{t-1} z_i z_i^\top + \lambda I$. By the definition of $\mathcal{H}_t$, it holds that $\mathcal{H}_t \succeq \kappa^{-1} V_t$, Lemma~\ref{lem:confidence_set} implies $\|\theta - \widetilde{\theta}_t\|_{V_t} \leq \sqrt{\kappa} \|\theta - \widetilde{\theta}_t\|_{\mathcal{H}_t} \leq \widetilde{\mathcal{O}}(\sqrt{\kappa d})$. This result shows that Lemma~\ref{lem:confidence_set} improves upon previous bounds by at least a factor of $\sqrt{\kappa}$.
+
+
+\section{Applications in Three Online RLHF Scenarios}
+\label{sec:applications}
+
+
+In this section, we apply our framework to three distinct RLHF scenarios, including online RLHF with passive data collection, active data collection, and deployment-time adaptation.
+
+\begin{figure*}
+  \begin{minipage}[t]{0.99\textwidth}
+      \centering
+      \subfigure[Passive Data Collection]{\includegraphics[width=0.32\columnwidth, trim=10mm 85mm 238mm 30mm, clip]{figs/settings.pdf}
+          \label{fig:passive}}
+      \hfill
+      \subfigure[Active Data Collection]{\includegraphics[width=0.32\columnwidth, trim=120mm 85mm 128mm 30mm, clip]{figs/settings.pdf}
+          \label{fig:active}}
+      \hfill
+      \subfigure[Deployment-Time Adaptation]{\includegraphics[width=0.32\columnwidth, trim=235mm 85mm 13mm 30mm, clip]{figs/settings.pdf}
+          \label{fig:deploy}}
+  \end{minipage}
+  \caption{Different settings of online RLHF. Contexts and actions selected by the environment (\faGlobe) are shown in grey, while those selected by the algorithm (\faSearch) are highlighted in color.}
+  \label{fig:settings}
+\end{figure*}
+
+\subsection{Online RLHF with Passive Data Collection}
+We first consider the passive data collection setting, where the algorithm can not control the data collection process. At each iteration, the learner obtains $(x_t, a_t, a_t', y_t)$ and updates by Eq.~\eqref{eq:omd}. We adopt the ``pessimism in the face of uncertainty'' principle and define the value function $\widetilde{J}_{t+1}(\pi)$ as
+\begin{align}
+  \label{eq:optimistic_value}
+  \widetilde{J}_{T+1}(\pi) = (\mathbb{E}_{x \sim \rho} \left[\phi(x, \pi(x))\right])^\top \widetilde{\theta}_{T+1} - \widetilde{\beta}_{T+1} \norm{\mathbb{E}_{x \sim \rho} \left[\phi(x, \pi(x))\right]}_{\mathcal{H}_{T+1}^{-1}}.
+\end{align}
+where $\rho$ is the context distribution. The policy $\pi_{T+1}$ is selected as $\pi_{T+1} = \argmax_{\pi \in \Pi} \widetilde{J}_{T+1}(\pi)$. The detailed procedure is present in Algorithm~\ref{alg:passive}, and we show it enjoys the following guarantee:
+
+\begin{myThm}
+  \label{thm:passive}
+  Set parameters as in Lemma~\ref{lem:confidence_set}, with probability at least $1-\delta$, Algorithm~\ref{alg:passive} ensures
+  \begin{align*}
+    {\subopt}(\pi_{T+1}) = \mathbb{E}_{x \sim \rho} \left[r(x, \pi^*(x)) - r(x, \pi_{T+1}(x))\right] \leq \widetilde{\mathcal{O}} \left(\sqrt{d} \cdot \bignorm{\mathbb{E}_{x \sim \rho} \left[\phi(x,\pi^*(x))\right]}_{\mathcal{H}_{T+1}^{-1}} \right),
+  \end{align*}
+  where $\rho$ is the context distribution and $\pi^*$ is the optimal policy.
+\end{myThm}
+\begin{myRemark}
+  The term $\bignorm{\mathbb{E}_{x \sim \rho} \left[\phi(x,\pi^*(x))\right]}_{\mathcal{H}_{T+1}^{-1}}$ is referred to ``concentrability coefficient'' in the literature. It measures the distribution shift between the optimal policy and the collected data.
+\end{myRemark}
+
+\begin{myRemark}
+Our result improves upon~\citet{ICML'23:Zhu-Principled} in both statistical and computational efficiency. Specifically, since $\mathcal{H}_t \succeq \kappa^{-1} V_t$, Theorem~\ref{alg:passive} directly implies a $\widetilde{\mathcal{O}} (\sqrt{d \kappa} \cdot \norm{\mathbb{E}_{x \sim \rho} \left[\phi(x,\pi^*(x))\right]}_{V_{T+1}^{-1}} )$ guarantee, improving their $\widetilde{\mathcal{O}} (\sqrt{d} \kappa \cdot \norm{\mathbb{E}_{x \sim \rho} \left[\phi(x,\pi^*(x))\right]}_{V_{T+1}^{-1}} )$ result by a factor of $\sqrt{\kappa}$. Regarding computational efficiency, their algorithm has a total storage complexity of $\mathcal{O}(T)$ and a time complexity of $\mathcal{O}(T \log T)$, leading to an amortized per-iteration cost of $\mathcal{O}(\log T)$. In contrast, our algorithm maintains a strict $\mathcal{O}(1)$ complexity per iteration, offering a substantial computational advantage.
+\end{myRemark}
+
+\begin{figure*}[t]
+  \centering
+\begin{minipage}[t]{0.48\textwidth}
+  \begin{algorithm}[H]
+    \caption{Active Data Collection}
+    \label{alg:active}
+    \begin{algorithmic}[1]
+        \REQUIRE Regularization $\lambda$, step size $\eta$
+        \STATE Initialize $\widetilde{\theta}_1=\bm{0}$ and $\mathcal{H}_1 = \lambda I$
+        \FOR {$t=1,2, \ldots, T$}
+        \STATE Choose $(x_t, a_t, a_t^{\prime})$ as Eq.~\eqref{eq:active-query}, observe $y_t$
+        \STATE $\widetilde{\theta}_{t+1} = \text{Algorithm~\ref{alg:omd} } (x_t, a_t, a_t', y_t)$
+        \ENDFOR
+        \STATE Set $\widetilde{r}_{T+1}(x, a) = \frac{1}{T+1} \sum_{t=1}^{T+1} \phi(x, a)^\top \widetilde{\theta}_t$
+        \ENSURE $\pi_{T+1}(x) = \argmax_{a \in \mathcal{A}} \widetilde{r}_{T+1}(x, a)$
+    \end{algorithmic}
+  \end{algorithm}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.48\textwidth}
+  \begin{algorithm}[H]
+    \caption{Deployment-Time Adaptation}
+    \label{alg:deploy}
+    \setstretch{1.03}
+    \begin{algorithmic}[1]
+        \REQUIRE Regularization $\lambda$, step size $\eta$
+        \STATE Initialize $\widetilde{\theta}_1=0$ and $\mathcal{H}_1 = \lambda I$.
+        \FOR {$t=1,2, \ldots, T$}
+        \STATE Observes the context $x_t$.
+        \STATE Selects $a_t$ and $a_t'$ as Eq.~\eqref{eq:first-action} and Eq.~\eqref{eq:second-action}
+        \STATE Observe the preference feedback $y_t$
+        \STATE $\widetilde{\theta}_{t+1} = \text{Algorithm~\ref{alg:omd} } (x_t, a_t, a_t', y_t)$
+        \ENDFOR
+    \end{algorithmic}
+  \end{algorithm}
+  \end{minipage}
+\vspace{-2mm}
+\end{figure*}
+
+\subsection{Online RLHF with Active Data Collection}
+As established in Theorem~\ref{thm:passive}, the sub-optimality gap depends on the concentrability coefficient, which quantifies the distributional mismatch between the optimal policy and the collected data. In this subsection, we propose an active data collection method that removes this dependency.
+
+\textbf{Active Data Collection.}~~At each iteration, we obtain a new preference data $(x_t, a_t, a_t', y_t)$. We then update the reward model using our one-pass reward modeling method as in Eq.~\eqref{eq:omd}. To guide data acquisition, we actively select the query with the highest uncertainty under the current reward model. Specifically, we select the next query by solving:
+\begin{align}
+  \label{eq:active-query}
+  (x_{t+1}, a_{t+1}, a_{t+1}') = \argmax_{x, a, a^{\prime} \in \mathcal{X} \times \mathcal{A} \times \mathcal{A}} \left\{\bignorm{\phi(x, a) - \phi(x, a')}_{\mathcal{H}_{t+1}^{-1}}\right\}.
+\end{align}
+
+\textbf{Policy Optimization.}~~After $T$ rounds, we define the reward as the average of all the past estimations $\widetilde{r}_{T+1}(x, a) = \frac{1}{T+1} \sum_{t=1}^{T+1} \phi(x, a)^\top \widetilde{\theta}_t$. The policy is given by $\pi_{T+1}(x) = \argmax_{a \in \mathcal{A}} \widetilde{r}_{T+1}(x, a)$.
+
+The detailed procedure is present in Algorithm~\ref{alg:active}. We show it enjoys the following guarantee.
+
+\begin{myThm}
+  \label{thm:active}
+  Set parameters as in Lemma~\ref{lem:confidence_set}, with probability at least $1-\delta$, Algorithm~\ref{alg:active} ensures
+  \begin{align*}
+    \subopt(\pi_{T+1}) = \mathbb{E}_{x \sim \rho} \left[r(x, \pi^*(x)) - r(x, \pi_{T+1}(x))\right] \leq \widetilde{\mathcal{O}} \big(d \sqrt{{\kappa}/{T}}\big),
+  \end{align*}
+  where $\rho$ is the context distribution and $\pi^*$ is the optimal policy.
+\end{myThm}
+
+\begin{myRemark}
+  We attain the same sub-optimality gap as ~\citet{arXiv'24:Das-RLHF-active}, but improve the computational efficiency significantly. Our algorithm has an $\mathcal{O}(1)$ time and space complexity per round, while their MLE estimator needs $\mathcal{O}(t \log t)$ time and $\mathcal{O}(t)$ space complexity at iteration $t$.
+\end{myRemark}
+
+\subsection{Online RLHF with Deployment-Time Adaptation}
+
+In this section, we consider the deployment-time adaptation setting, where users provide input contexts in an online manner, and the learner generates responses while simultaneously collecting feedback to improve the model. In this scenario, the learner faces a dual objective: selecting actions that maximize rewards to ensure a positive user experience, while also choosing actions that yield informative feedback to facilitate continual model improvement. To this end, we choose the cumulative regret as the performance measure, defined as
+\begin{align}
+  \label{eq:deploy-regret}
+  {\Reg}_T = \sum_{t=1}^T \left(r\left(x_t, \pi^*(x_t)\right)- \frac{1}{2} \left(r\left(x_t, a_t\right) + r\left(x_t, a'_t\right)\right)\right),
+\end{align}
+where $\pi^*$ is the optimal policy. This measure differs from the one introduced by~\citet{arXiv'24:Ji-RLHF-active}, which evaluates the gap between th  e optimal action and a single selected action. Our measure is designed to ensure that both actions are sufficiently effective, thereby delivering a high-quality user experience. While better aligns with deployment needs, it also poses greater challenges. Specifically, to optimize the measure in~\citet{arXiv'24:Ji-RLHF-active}, the learner can exploit one high-reward action while using the other for uniform exploration. In contrast, our setting imposes a stricter requirement: both actions must be good, thereby limiting the ability to sacrifice one action purely for exploration.
+
+\textbf{Action selection.}~~At each iteration, given a new preference data $(x_t, a_t, a_t', y_t)$, the learner updates the reward model using our one-pass reward modeling method as in Eq.~\eqref{eq:omd}. The learner must select queries that are both informative and with high rewards. To address this, we choose the first action $a_{t+1}$ to maximize the estimated reward based on the estimator $\widetilde{\theta}_{t+1}$, i.e.,
+\begin{align}
+  \label{eq:first-action}
+  a_{t+1} = \argmax_{a \in \mathcal{A}} \phi(x_{t+1}, a)^\top \widetilde{\theta}_{t+1}.
+\end{align}
+The second action $a_{t+1}'$ aims to maximize the reward and the distance between the two actions, i.e.,
+\begin{align}
+  \label{eq:second-action}
+  a_{t+1}' = \argmax_{a' \in \mathcal{A}}~ \big\{\phi(x_{t+1}, a')^\top \widetilde{\theta}_{t+1} + \widetilde{\beta}_{t+1} \norm{\phi(x_{t+1}, a') - \phi(x_{t+1}, a_{t+1})}_{\mathcal{H}_{t+1}^{-1}}\big\} .
+\end{align}
+The overall algorithm is summarized in Algorithm~\ref{alg:deploy}. We show it enjoys the following regret bound.
+
+\begin{myThm}
+    \label{thm:deploy}
+    For any $\delta \in (0,1]$, set parameters as in Lemma~\ref{lem:confidence_set}, Algorithm~\ref{alg:deploy} ensures with probability at least $1-\delta$, the regret satisfies
+    \begin{align*}
+      {\Reg}_T \leq \widetilde{\mathcal{O}} \big(d\sqrt{{\kappa}{T}}\big).
+    \end{align*}
+\end{myThm}
+\begin{myRemark}
+  Our result improves upon~\citet{AISTATS'23:Saha-Dueling-RL} in both computational and statistical efficiency. Statistically, Theorem~\ref{thm:deploy} improves their $\widetilde{\mathcal{O}} \big(d{\kappa}\sqrt{{T}}\big)$ result by a factor of $\sqrt{\kappa}$. Computationally, our algorithm has an $\mathcal{O}(1)$ time and space complexity per round, while their MLE estimator needs $\mathcal{O}(t \log t)$ time and $\mathcal{O}(t)$ space complexity at iteration $t$ due to optimization over the historical data.
+\end{myRemark}
+
+
+\section{Practical Implementation}
+\label{sec:practical}
+In this section, we introduce the practical implementation of our proposed algorithm.
+
+\subsection{Computation of Inverse Hessian}
+The OMD update in Eq.~\eqref{eq:omd} requires computation of the inverse of the Hessian matrix. Omitting the projection operation, Eq.~\eqref{eq:omd} can be rewritten as $\widetilde{\theta}_{t+1} = \widetilde{\theta}_t - \eta \widetilde{\mathcal{H}}_t^{-1}g_t(\widetilde{\theta}_t)$. Computing the full Hessian inverse $\widetilde{\mathcal{H}}_t^{-1}$ directly incurs a time complexity of $\mathcal{O}(d^3)$, which is prohibitive for LLMs.
+
+This cost can be reduced to $\mathcal{O}(d^2)$ by applying the Sherman-Morrison-Woodbury formula, leveraging the fact that the Hessian is a rank-one update. Specifically, for a matrix of the form $A + \mathbf{x}\mathbf{x}^\top$ where $A$ is invertible and $\mathbf{x}$ is a vector, the inverse is given by $(A + \mathbf{x} \mathbf{x}^\top)^{-1} = A^{-1} - \frac{A^{-1} \mathbf{x} \mathbf{x}^\top A^{-1}}{1 + \mathbf{x}^\top A^{-1} \mathbf{x}}$, requiring only $\mathcal{O}(d^2)$ time. Nevertheless, even this reduced complexity is costly for large models.
+
+To further reduce the computational burden to $\mathcal{O}(d)$, we employ the Hessian-vector product technique combined with conjugate gradient descent~\citep{book'04:Boyd-convex}. Instead of explicitly computing $\widetilde{\mathcal{H}}_t^{-1}$, we solve the linear system $\widetilde{\mathcal{H}}_t v = g_t(\widetilde{\theta}_t)$ iteratively, where $v$ is the solution we seek. The HVP operation $\widetilde{\mathcal{H}}_t v$ for any vector $v$ can be computed efficiently using twice differentiation: $\widetilde{\mathcal{H}}_t v = \nabla_\theta \big(\nabla_\theta \mathcal{L}_t(\theta)^\top v\big)\big|_{\theta=\widetilde{\theta}_t} + \lambda_t v$, where $\mathcal{L}_t(\theta)$ is the function whose Hessian matrix at $\widetilde{\theta}_t$ is $\widetilde{\mathcal{H}}_t$. By leveraging this efficient computation, the conjugate gradient method iteratively refines the solution. In practice, finding $\mathcal{L}_t(\theta)$ is challenging as $\widetilde{\mathcal{H}}_t = \mathcal{H}_t + \eta H_t(\widetilde{\theta}_t)$ involve complex structure. A key insight is $\widetilde{\mathcal{H}}_t$ can be viewed as the cumulative Hessian of the $\ell_t(\theta)$ approximately. This motivates the use of a more tractable surrogate $\ell_t(\theta)$ in Eq.~\eqref{eq:mle} while keeping the update. To further approximate the effect of curvature accumulation, we adopt an adaptive damping scheme that approximately preserves historical Hessian information while incorporating new Hessian updates: $\lambda_t = \lambda_0 \cdot \min \{1, f(t / T)\}$, where $f(\cdot)$ is a monotonic increasing function, such as linear functions.
+
+
+\subsection{Computation of Model Uncertainty}
+In both online RLHF with active data collection and deployment-time adaptation, our algorithm utilizes uncertainty-driven query selection strategies. While quantifying uncertainty using the local norm induced by the Hessian matrix offers strong theoretical guarantees, it is computationally prohibitive in practice. To address this challenge, we adopt a rejection sampling-based approximation, a technique commonly employed for exploration in the literature~\citep{arXiv'21:WebGPT,arXiv'23:ReST,TMLR'23:RAFT,TMLR'24:Dong-RLHF}. Specifically, given a prompt, we sample $n$ independent responses by the current model, then use the trained reward model to rank the responses. Then, we use different strategies to select the response for different settings. Specifically, In active data collection, the key insight is to identify and query samples that exhibit the greatest diversity in prompt action features. To this end, we select the response with the highest predicted reward and the response with the lowest predicted reward. In deployment-time adaptation, the core idea is to select the first action to maximize the estimated reward, while the second is chosen to balance high reward with sufficient divergence from the first. Concretely, we select the response with the highest predicted reward and another from the top-$1/q$ percentile of the reward, where $q$ is a hyperparameter.
+
+
+\section{Experiments}
+\label{sec:experiments}
+
+
+In this section, we empirically evaluate the performance of our proposed method.~\footnotemark[1] We first describe the experimental setup, and then present the empirical results.
+
+\subsection{Experiment setup}
+In our experiments, we employ the \texttt{Llama-3-8B-Instruct}~\footnotemark[2] and \texttt{Qwen2.5-7B-Instruct}~\footnotemark[3] as the foundation model for reward model. We extract features $\phi(x,a)$ using the last layer of the model, and the dimension is $d=4096$. We use two datasets for evaluation. The first one is {Ultrafeedback-binarized dataset}~\footnotemark[4], a pre-processed version of the original Ultrafeedback dataset~\citep{arXiv'23:Ultrafeedback}, a widely used benchmark for RLHF. It collects about $64, 000$ prompts from diverse resources, including question answering, summarization, and dialogue generation. Each data consists of a context $x$, two responses $a$ and $a'$, and a preference label $y$. We also employ a mixed dataset, {Mixture2} dataset~\footnotemark[4], which combines a variety of preference datasets, including HH-RLHF, SHP, UltraFeedback, etc.
+
+\footnotetext[1]{The code is available at \url{https://github.com/ZinYY/Online_RLHF}}
+\footnotetext[2]{\url{huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct}}
+\footnotetext[3]{\url{huggingface.co/Qwen/Qwen2.5-7B-Instruct}}
+\footnotetext[4]{\url{huggingface.co/datasets/OpenRLHF/preference_dataset_mixture2_and_safe_pku}}
+
+
+\begin{figure*}
+    \begin{minipage}[t]{0.99\textwidth}
+        \centering
+        \subfigure[training loss]{\includegraphics[width=0.23\columnwidth]{figs/offline_passive_train_loss.pdf}
+            \label{fig:passive-train-loss}}
+        \hfill
+        \subfigure[training accuracy]{\includegraphics[width=0.23\columnwidth]{figs/offline_passive_train_acc.pdf}
+            \label{fig:passive-train-acc}}
+        \hfill
+        \subfigure[evaluation loss]{\includegraphics[width=0.23\columnwidth]{figs/offline_passive_eval_loss.pdf}
+            \label{fig:passive-eval-loss}}
+        \hfill
+        \subfigure[evaluation accuracy]{\includegraphics[width=0.23\columnwidth]{figs/offline_passive_eval_acc.pdf}
+            \label{fig:passive-eval-acc}}
+    \end{minipage}
+    \caption{For \texttt{Llama-3-8B-Instruct} on Ultrafeedback-binarized dataset with passive data collection, we report the comparison of MLE and our OMD-based method for the reward model about (a) training loss, (b) training accuracy, (c) evaluation loss and (d) evaluation accuracy.}
+    \label{fig:training_passive}
+\end{figure*}
+
+\begin{figure*}[!t]
+    \begin{minipage}[t]{0.99\textwidth}
+        \centering
+        \subfigure[training loss]{
+            {\includegraphics[width=0.225\textwidth]{figs/offline_qwen_train_loss.pdf}}
+        }
+        \subfigure[training accuracy]{
+            {\includegraphics[width=0.225\textwidth]{figs/offline_qwen_train_acc.pdf}}
+        }
+        \subfigure[evaluation loss]{
+            {\includegraphics[width=0.225\textwidth]{figs/offline_qwen_eval_loss.pdf}}
+        }
+        \subfigure[evaluation accuracy]{
+            {\includegraphics[width=0.225\textwidth]{figs/offline_qwen_eval_acc.pdf}}
+        }
+    \end{minipage}
+    \caption{For \texttt{Qwen2.5-7B-Instruct} on Ultrafeedback-binarized dataset with passive data collection, we report the comparison of MLE and our OMD-based method for the reward model about (a) training loss, (b) training accuracy, (c) evaluation loss and (d) evaluation accuracy.}
+    \label{fig:training_passive_qwen}
+\end{figure*}
+
+\begin{figure*}[!t]
+    \begin{minipage}[t]{0.99\textwidth}
+        \centering
+        \subfigure[training loss]{
+            {\includegraphics[width=0.22\textwidth]{figs/offline_mixture_train_loss.pdf}}
+        }
+        \subfigure[training accuracy]{
+            {\includegraphics[width=0.22\textwidth]{figs/offline_mixture_train_acc.pdf}}
+        }
+        \subfigure[evaluation loss]{
+            {\includegraphics[width=0.22\textwidth]{figs/offline_mixture_eval_loss.pdf}}
+        }
+        \subfigure[evaluation accuracy]{
+            {\includegraphics[width=0.22\textwidth]{figs/offline_mixture_eval_acc.pdf}}
+        }
+    \end{minipage}
+    \caption{For \texttt{Llama-3-8B-Instruct} on Mixture2 dataset with passive data collection, we report the comparison of MLE and our OMD-based method for the reward model about (a) training loss, (b) training accuracy, (c) evaluation loss and (d) evaluation accuracy.}
+    \label{fig:training_passive_mixture}
+\end{figure*}
+
+
+\subsection{Experimental results}
+In this section, we present the experimental results, including passive data collection, active data collection and deployment-time adaptation.
+
+
+\subsubsection{Passive Data Collection}
+
+We randomly sample $T=30, 000$ data points from the dataset for training the reward model. We evaluate both the standard MLE-based method, which uses a stochastic gradient descent (SGD) optimizer, and our proposed OMD-based method in terms of reward model loss and accuracy. Figures~\ref{fig:training_passive},~\ref{fig:training_passive_qwen}, and~\ref{fig:training_passive_mixture} present the results for three settings: (\romannumeral1) the \texttt{Llama-3-8B-Instruct} model on the Ultrafeedback-binarized dataset, (\romannumeral2) the \texttt{Qwen2.5-7B} model on the same dataset, and (\romannumeral3) the \texttt{Llama-3-8B-Instruct} model on the Mixture2 dataset. We report the results across four key metrics: (a) training loss, (b) training accuracy, (c) evaluation loss and (d) evaluation accuracy.
+ Our method demonstrates faster convergence to a lower loss and achieves higher evaluation accuracy compared to the MLE baseline. These results highlight the superior statistical efficiency of the OMD-based approach, which achieves improved performance with fewer training samples.
+
+
+\begin{figure}[!t]
+    \centering
+    \begin{minipage}{0.58\textwidth}
+        \centering
+        \subfigure[training loss]{\includegraphics[width=0.475\columnwidth]{figs/active_train_loss.pdf}
+        \label{fig:active_train_loss}}
+        \hfill
+        \subfigure[evaluation accuracy]{\includegraphics[width=0.475\columnwidth]{figs/active_eval_acc.pdf}
+        \label{fig:active_eval_acc}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \vspace{2mm}
+        \subfigure[evaluation accuracy and training time]{
+        \resizebox{0.95\textwidth}{!}{
+        \begin{tabular}{cccc}
+            \toprule
+            Method & ACC (\%) & Time (s) \\
+            \midrule
+            Rand-MLE & 69.51$\pm$0.5 & 4876$\pm$47 \\
+            Active-MLE & 69.82$\pm$0.4 & 4982$\pm$52 \\
+            Rand-OMD & 68.97$\pm$0.6 & 1456$\pm$31 \\
+            \textbf{Ours} & 70.43$\pm$0.3 & 1489$\pm$36 \\
+            \bottomrule
+        \vspace{0.1mm}
+        \end{tabular}
+        }
+        \label{tab:training_active_results}
+        }
+    \end{minipage}
+    \caption{For \texttt{Llama-3-8B-Instruct} on Ultrafeedback-binarized dataset with active data collection, we report the comparison of different methods about (a) training loss, (b) evaluation accuracy and (c) final evaluation accuracy and training time.}
+    \label{fig:active_results}
+\end{figure}
+
+\begin{figure}[!t]
+    \centering
+    \begin{minipage}{0.58\textwidth}
+        \centering
+        \subfigure[training loss]{\includegraphics[width=0.475\columnwidth]{figs/active_train_loss_qwen.pdf}
+        \label{fig:active_train_loss_qwen}}
+        \hfill
+        \subfigure[evaluation accuracy]{\includegraphics[width=0.475\columnwidth]{figs/active_eval_acc_qwen.pdf}
+        \label{fig:active_eval_acc_qwen}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \vspace{1.5mm}
+        \subfigure[evaluation accuracy and training time]{
+        \resizebox{0.97\textwidth}{!}{
+        \begin{tabular}{cccc}
+            \toprule
+            Method     & ACC (\%) & Time (s) \\
+            \midrule
+            Rand-MLE   & 67.36 $\pm$ 0.5    & 4653 $\pm$ 121     \\
+            Active-MLE & 67.25 $\pm$ 0.4    & 4701 $\pm$ 103     \\
+            Rand-OMD   & 66.80 $\pm$ 0.5    & 1312 $\pm$ 47{\color{white} 0}     \\
+            \textbf{Ours}       & 67.11 $\pm$ 0.5    & 1325 $\pm$ 54{\color{white} 0}     \\
+            \bottomrule
+        \vspace{1.5mm}
+        \end{tabular}
+        }
+        \label{tab:training_active_results_qwen}
+        }
+    \end{minipage}
+    \caption{For \texttt{Qwen2.5-7B-Instruct} on Ultrafeedback-binarized dataset with active data collection, we report the comparison of different methods about (a) training loss, (b) evaluation accuracy and (c) final evaluation accuracy and training time.}
+    \label{fig:active_results_qwen}
+\end{figure}
+
+
+\subsubsection{Active Data Collection}
+
+In this experimental setup, we constrain the algorithm to select only 6,400 samples from the full training dataset, based on different data selection strategies. We evaluate the performance of both the standard MLE-based method and our proposed OMD-based method under this limited data regime. To assess the effectiveness of the data selection strategy itself, we compare our approach against a random selection baseline. We report the results across four key metrics: (a) training loss curve, (b) evaluation accuracy curve and (c) final evaluation accuracy and training time. Figure~\ref{fig:active_results} and Figure~\ref{fig:active_results_qwen} demonstrate that our OMD-based method achieves competitive performance with the MLE-based method for both data collection strategies, while improving the training time by significantly. Moreover, our data selection strategy outperforms the random selection strategy, demonstrating that our method can effectively select informative data to improve the performance.
+
+
+\subsubsection{Deployment-Time Adaptation}
+
+To emulate real-world deployment scenarios, we partition the dataset into 20 sequential chunks and process them incrementally. This setup allows us to evaluate the adaptability and robustness of different action selection strategies over time. We benchmark our proposed selection strategy against three baselines: (\romannumeral1): random selection, (\romannumeral2): the best and second best actions, and (\romannumeral3): the best and worst actions. We combine the above strategies with MLE-based and OMD-based reward estimators. We report three key metrics: (a) the average cumulative reward for MLE-based methods, (b) the average cumulative reward for OMD-based methods, and (c) the win rate of OMD-based methods over MLE-based counterparts under identical selection strategies. As illustrated in Figure~\ref{fig:deployment} and Figure~\ref{fig:deployment_qwen}, our action selection strategy consistently outperforms the baselines across both estimator types. These results highlight the strength of our approach in balancing the exploitation of high-reward responses with sufficient exploration to drive continual model improvement. Moreover, the win rate comparisons suggest that our OMD-based estimator shows competitive performance relative to its MLE-based counterpart, further validating its practical effectiveness.
+
+\begin{figure}[!t]
+    \centering
+    \subfigure[Reward of MLE-based methods]{\includegraphics[width=0.3\columnwidth]{figs/deployment_cumulative_rewards_regular.pdf}
+    \label{fig:deployment_mle}}
+    \hfill
+    \subfigure[Reward of OMD-based methods]{\includegraphics[width=0.3\columnwidth]{figs/deployment_cumulative_rewards.pdf}
+    \label{fig:deployment_omd}}
+    \hfill
+    \subfigure[Win rates, all methods]{\includegraphics[width=0.3\columnwidth]{figs/win_rate_new.pdf}
+    \label{fig:deployment_win_rate}}
+    \caption{For \texttt{Llama-3-8B-Instruct} on Ultrafeedback-binarized dataset with deployment-time adaptation, we report (a) cumulative reward of MLE-based methods, (b) cumulative reward of OMD-based methods, and (c) win rates between MLE-based and OMD-based estimators with the same action selection strategy.}
+    \label{fig:deployment}
+\end{figure}
+
+\begin{figure}[!t]
+    \centering
+    \subfigure[Reward of MLE-based methods]{\includegraphics[width=0.3\columnwidth]{figs/deployment_cumulative_rewards_regular_qwen.pdf}
+    \label{fig:deployment_mle_qwen}}
+    \hfill
+    \subfigure[Reward of OMD-based methods]{\includegraphics[width=0.3\columnwidth]{figs/deployment_cumulative_rewards_qwen.pdf}
+    \label{fig:deployment_omd_qwen}}
+    \hfill
+    \subfigure[Win rates, all methods]{\includegraphics[width=0.3\columnwidth]{figs/win_rate_new_qwen.pdf}
+    \label{fig:deployment_win_rate_qwen}}
+    \caption{For \texttt{Qwen2.5-7B-Instruct} on Ultrafeedback-binarized dataset with deployment-time adaptation, we report (a) cumulative reward of MLE-based methods, (b) cumulative reward of OMD-based methods, and (c) win rates between MLE-based and OMD-based estimators with the same action selection strategy.}
+    \label{fig:deployment_qwen}
+\end{figure}
+
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+In this work, we study the problem of online RLHF from the perspective of contextual bandits. To address the linear growth in computational complexity with respect to the number of iterations in reward modeling, we propose a novel one-pass reward modeling algorithm that achieves constant-time complexity per iteration. Our method is built upon the online mirror descent framework and incorporates a carefully designed local norm that captures second-order information. We apply our method to a broad range of online RLHF settings, including passive data collection, active data collection, and deployment-time adaptation, and design tailored algorithms for each scenario. We provide theoretical guarantees that our approach achieves superior statistical and computational efficiency relative to existing methods. Finally, we provide practical implementations of our method and conduct experiments using the \texttt{Llama-3-8B-Instruct} and \texttt{Qwen2.5-7B-Instruct} models on the Ultrafeedback-binarized and Mixture2 datasets, empirically validating its practical effectiveness.
+
+While our work advances both the statistical and computational understanding of online RLHF, several important directions remain for future exploration. First, we assume a fixed feature mapping for the reward model; however, in practice, this mapping may evolve throughout the training process. Analyzing the impact of such dynamically changing feature representations presents a compelling direction for future research. Second, although our analysis is based on the Bradley-Terry model, extending the framework to other preference models, such as the Plackett-Luce model~\citep{59:Luce-choice,75:Plackett-permutations}, is another promising avenue that may broaden the applicability of our results.
