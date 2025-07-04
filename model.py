@@ -2,7 +2,7 @@ import numpy as np
 
 class LinearRewardModel:
     """Simple linear model r(x) = x^T theta."""
-    def __init__(self, dim: int, theta_init: np.ndarray | None = None, seed: int | None = None):
+    def __init__(self, dim: int, theta_init: np.ndarray = None, seed: int = None):
         self.dim = dim
         rng = np.random.default_rng(seed)
         if theta_init is None:

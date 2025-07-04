@@ -8,16 +8,16 @@ from optimizers import OnlineOGD, OnlineOMD, OnlineMLE, ImplicitOMD
 
 def run_experiment(dim: int = 20, T: int = 2000, seed: int = 0,
                    eta_ogd: float = 0.5, eta_omd: float = 0.5, eta_iomd: float = 0.5,
-                   lam: float = 1.0, mle_lr: float = 0.1):
+                   lam: float = 1.0, mle_lr: float = 0.01):
     rng = np.random.default_rng(seed)
     theta_star = rng.normal(size=dim)
 
     stream = GaussianStream(dim, theta_star, seed=seed + 1)
 
-    model_ogd = LinearRewardModel(dim, seed=seed + 2)
-    model_omd = LinearRewardModel(dim, seed=seed + 3)
-    model_iomd = LinearRewardModel(dim, seed=seed + 4)
-    model_mle = LinearRewardModel(dim, seed=seed + 5)
+    model_ogd = LinearRewardModel(dim, seed=seed)
+    model_omd = LinearRewardModel(dim, seed=seed)
+    model_iomd = LinearRewardModel(dim, seed=seed)
+    model_mle = LinearRewardModel(dim, seed=seed)
 
     ogd = OnlineOGD(model_ogd, eta_ogd)
     omd = OnlineOMD(model_omd, eta_omd, lam)
@@ -51,7 +51,7 @@ def run_experiment(dim: int = 20, T: int = 2000, seed: int = 0,
     plt.title('Parameter Error vs. Iterations')
     plt.legend()
     plt.tight_layout()
-    plt.savefig('result.png')
+    plt.savefig('result.pdf')
     return errors
 
 

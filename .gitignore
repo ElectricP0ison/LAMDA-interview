@@ -1,0 +1,10 @@
+# Python bytecode
+*.pyc
+
+# Virtualenv
+venv/
+
+# Build
+build/
+dist/
+__pycache__/
