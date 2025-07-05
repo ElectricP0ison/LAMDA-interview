@@ -1,9 +1,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import time
+import csv
 
 from data import GaussianStream
 from model import LinearRewardModel
 from optimizers import OnlineOGD, OnlineOMD, OnlineMLE, ImplicitOMD
+from timer import Timer
 
 
 def run_experiment(dim: int = 20, T: int = 2000, seed: int = 0,
@@ -30,18 +33,32 @@ def run_experiment(dim: int = 20, T: int = 2000, seed: int = 0,
         'Implicit OMD': [],
         'MLE': []
     }
+    step_times = {
+        'OGD': [],
+        'One-Pass OMD': [],
+        'Implicit OMD': [],
+        'MLE': []
+    }
+
+    wall_start = time.perf_counter()
 
     for _ in range(T):
         x, y = stream.sample()
-        ogd.step(x, y)
-        omd.step(x, y)
-        iomd.step(x, y)
-        mle.step(x, y)
+        with Timer(step_times['OGD']):
+            ogd.step(x, y)
+        with Timer(step_times['One-Pass OMD']):
+            omd.step(x, y)
+        with Timer(step_times['Implicit OMD']):
+            iomd.step(x, y)
+        with Timer(step_times['MLE']):
+            mle.step(x, y)
 
         errors['OGD'].append(np.linalg.norm(model_ogd.theta - theta_star))
         errors['One-Pass OMD'].append(np.linalg.norm(model_omd.theta - theta_star))
         errors['Implicit OMD'].append(np.linalg.norm(model_iomd.theta - theta_star))
         errors['MLE'].append(np.linalg.norm(model_mle.theta - theta_star))
+
+    wall_time = time.perf_counter() - wall_start
 
     plt.figure(figsize=(7, 4))
     for name, vals in errors.items():
@@ -52,7 +69,25 @@ def run_experiment(dim: int = 20, T: int = 2000, seed: int = 0,
     plt.legend()
     plt.tight_layout()
     plt.savefig('result.pdf')
-    return errors
+
+    plt.figure(figsize=(7, 4))
+    for name, vals in step_times.items():
+        plt.plot(vals, label=name)
+    plt.xlabel('Iteration')
+    plt.ylabel('Time (s)')
+    plt.title('Step Time per Iteration')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('timing.pdf')
+
+    with open('timing.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Optimizer', 'TotalTime', 'AverageTime'])
+        for name, vals in step_times.items():
+            writer.writerow([name, sum(vals), np.mean(vals)])
+        writer.writerow(['TotalWallTime', wall_time, ''])
+
+    return errors, step_times, wall_time
 
 
 if __name__ == "__main__":
